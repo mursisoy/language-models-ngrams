@@ -1,0 +1,322 @@
+# Sistemas Inteligentes Práctica 1 (2021-2022)
+
+```elixir
+Mix.install([
+  {:jason, "~> 1.3"},
+  {:httpoison, "~> 2.0"},
+  {:nimble_csv, "~> 1.1"}
+])
+```
+
+## Generación de texto predictivo basado en N-grams
+
+Práctica basada en:
+
+* https://www.analyticsvidhya.com/blog/2019/08/comprehensive-guide-language-model-nlp-python-code/
+* https://nlpforhackers.io/language-models/
+
+Más información en:
+
+* https://www.nltk.org/api/nltk.html
+* https://web.stanford.edu/~jurafsky/slp3/ (--> Language Modeling with N-Grams)
+
+Libros a descargar en texto plano UTF-8:
+
+* https://www.gutenberg.org/
+
+```elixir
+defmodule NGrams do
+  @moduledoc """
+  Create an N-Gram model given list of words
+  """
+
+  @doc """
+  Sanitize a text, optionally removing headers
+
+  ## Parameters
+
+  - text: A list with sentences we want to sanitize and tokenize
+  - opts: An enumeration with optional arguments
+    - :drop: The number of lines to drop
+
+  ## Returns
+
+  A list with all the remaining words as ordered tokens.
+  """
+  def sanitize_tokenize(strings, opts \\ [drop: 0]) do
+    strings
+    |> Enum.drop(opts[:drop])
+    |> Enum.map(
+      &(String.trim(&1)
+        # Replace headings, Names for acting, and brackets
+        |> String.replace(~r/^([A-Z]\w+\.|^[A-Z|\s]*\.?|\[.*\])$/, "")
+        # Add space-pad between punctuation symbols
+        |> String.replace(~r/(\.|,|\?|¿|!|¡|;)/, " \\g{1} ")
+        # Remove double dash
+        |> String.replace(~r/(\(|\)|--)/, ""))
+    )
+    |> Enum.flat_map(&String.split(&1, " ", trim: true))
+  end
+
+  @doc """
+  Given a list of words, calculate de n-gram model.
+
+  ## Parameters 
+
+  - words: A list of words
+  - n: The length of the n-gram
+
+  ## Returns
+  The ngram model.
+
+  ## Examples
+
+    iex> NGrams.ngram_model(["Hello", "my", "name", "is", "Alberto", "and", "your", "name", "is", "José", "."], 3)
+    %{
+      ["Alberto", "is"] => %{"and" => 1.0},
+      ["José", "is"] => %{"." => 1.0},
+      ["and", "Alberto"] => %{"your" => 1.0},
+      ["is", "name"] => %{"Alberto" => 0.5, "José" => 0.5},
+      ["my", "Hello"] => %{"name" => 1.0},
+      ["name", "my"] => %{"is" => 1.0},
+      ["name", "your"] => %{"is" => 1.0},
+      ["your", "and"] => %{"name" => 1.0}
+    }
+  """
+  def ngram_model(words, n) do
+    words
+    |> ngrams(n)
+    |> count()
+    |> freq()
+  end
+
+  @doc """
+  Given a list of words return chunks every n with step 1
+
+  ## Parameters
+  - words: A list of words
+  - n: Size of every chunk
+
+  ## Return
+  The list of chunks
+  """
+  def ngrams(words, n) do
+    Enum.chunk_every(words, n, 1, :discard)
+  end
+
+  @doc """
+  Given a list of chunks calculate the ngram, based on the following word
+
+  ## Parameters
+  - words: A list of words
+  - n: Size of every chunk
+
+  ## Return
+  The ngram with words counted
+  """
+  def count(ngrams) do
+    Enum.reduce(ngrams, %{}, fn ngram, acc ->
+      # n = length(ngram) - 1
+      # [gram, [next | _]] = Enum.chunk_every(ngram, n)
+
+      # We do it in reverse for performance
+      [next | gram] = Enum.reverse(ngram)
+
+      # The accumulator will be our model.
+      # We have to count for every gram the occurrences
+      # for the sibling. We use Map.update with a default
+      # and an update of inner map incrementing by one.
+      Map.update(acc, gram, %{next => 1}, fn n_words ->
+        Map.update(n_words, next, 1, &(&1 + 1))
+      end)
+    end)
+  end
+
+  @doc """
+  Given a counted model, return the computed frequencies
+
+  ## Parameters
+  - model: A ngram model with counted words
+
+  ## Return
+  The probabilistic model
+  """
+  def freq(model) do
+    Enum.map(model, fn {ngram, n_words} ->
+      # Calculate the total ocurrences
+      sum = Enum.reduce(n_words, 0, fn {_key, val}, acc -> acc + val end)
+      # Return de probability
+      # Since Enum.map returns a list, we need to call Enum.into(%{}) afterwards
+      {ngram, Enum.map(n_words, fn {key, val} -> {key, val / sum} end) |> Enum.into(%{})}
+    end)
+    |> Enum.into(%{})
+  end
+
+  @doc """
+  Given a beginning of a sentence in the form a vector, return a generated sentence with at least n words.
+
+  ## Parameters
+  - start: The beginining of the sentence
+  - model: An ngram model
+  - nwords: Max number of words to generate
+
+  ## Return
+  The list generated sentence
+  """
+  def generate(start, model, nwords) do
+    generate(Enum.reverse(start), model, Enum.reverse(start), nwords)
+  end
+
+  @doc """
+  Tail-recursive sentence generator based on nwords, model and previous n-gram
+  Return the generated sentence when remaining words to generate is 0
+
+  ## Return
+  The generated sentence
+  """
+  def generate(_, _, text, 0) do
+    text
+    |> Enum.reverse()
+    |> Enum.join(" ")
+  end
+
+  def generate(gram, model, text, nwords) do
+    # Get the next word or nil, random threshold
+    next_word =
+      case Map.get(model, gram) do
+        nil -> nil
+        word -> get_word(word, :rand.uniform())
+      end
+
+    # To get the new gram, we push the next_word at the begining 
+    # and pop the last element from the previous gram
+    new_gram =
+      [
+        next_word
+        | gram
+          |> Enum.reverse()
+          |> tl()
+          |> Enum.reverse()
+      ]
+
+    # Check for early finish
+    remain_words =
+      if Enum.all?(new_gram, &is_nil/1) do
+        0
+      else
+        nwords - 1
+      end
+
+    generate(new_gram, model, [next_word | text], remain_words)
+  end
+
+  @doc """
+  Given a map of words and probabilities, return the word until 
+  threshold is exceeded
+
+  ## Parameters
+  - words: A list of words
+  - threshold: The threshold
+
+  ## Return
+  The word
+  """
+  def get_word(words, threshold) do
+    words
+    |> Enum.reduce_while(0, fn {k, v}, acc ->
+      if acc + v < threshold do
+        {:cont, acc + v}
+      else
+        {:halt, k}
+      end
+    end)
+  end
+end
+
+ExUnit.start(auto_run: false)
+ExUnit.run()
+```
+
+```elixir
+{:ok, contents} = File.read(__DIR__ <> "/pg1513.txt")
+contents = contents |> String.split("\r\n")
+
+# contents = "hola esto es un ejemplo que lo escribo yo mismo. hola esto puede ser otro ejemplo o es un coche o es rojo. hola esto debe ser un ejemplo. Aunque no lo tengo tan claro, sabes? Qué te parece el resultado?"
+# contents = "Hello my name is Alberto and your name is José." |> String.split("\r\n")
+ngram_model =
+  NGrams.sanitize_tokenize(contents)
+  |> NGrams.ngram_model(3)
+
+# ngram_model
+# |> IO.inspect()
+
+~w"within that"
+|> NGrams.generate(ngram_model, 30)
+```
+
+```elixir
+# {:ok, contents} = File.read(__DIR__ <> "/ieee.json")
+# {:ok, contents} = Jason.decode(contents)
+
+# contents =
+#   for msg <- contents["messages"],
+#       msg["type"] == "message" &&
+#         is_binary(msg["text"]) &&
+#         msg["text"] != "" do
+#     msg["text"]
+#   end
+
+# ngram_model =
+#   NGrams.sanitize_tokenize(contents)
+#   |> NGrams.ngram_model(8)
+
+# {beginning, _} = Enum.random(ngram_model)
+
+# Enum.reverse(beginning)
+# |> NGrams.generate(ngram_model, 100)
+```
+
+```elixir
+# %HTTPoison.Response{body: body} = 
+case HTTPoison.get(
+       "https://docs.google.com/uc?export=download&id=1C8QDQ9ecuSHvYeRQtB5LVfhBrfYIoBiZ",
+       [timeout: 100],
+       follow_redirect: true
+     ) do
+  {:ok, %HTTPoison.Response{status_code: 200, body: body}} ->
+    body
+
+  {:error, %HTTPoison.Error{reason: {:invalid_redirection, {:ok, 303, headers, _}}}} ->
+    case HTTPoison.get(elem(List.keyfind(headers, "Location", 0), 1), [timeout: 100],
+           follow_redirect: true
+         ) do
+      {:ok, %HTTPoison.Response{status_code: 200, body: body}} -> body
+    end
+end
+|> then(&File.write!(__DIR__ <> "/ted_talks_es.csv", &1))
+```
+
+```elixir
+alias NimbleCSV.RFC4180, as: CSV
+{:ok, contents} = File.read(__DIR__ <> "/ted_talks_es.csv")
+
+sentences =
+  contents
+  |> CSV.parse_string(skip_headers: false)
+  |> Stream.transform(nil, fn
+    headers, nil -> {[], headers}
+    row, headers -> {[Enum.zip(headers, row) |> Map.new()], headers}
+  end)
+  |> Enum.map(fn %{"transcript" => transcript} -> transcript end)
+```
+
+```elixir
+ngram_model =
+  NGrams.sanitize_tokenize(sentences)
+  |> NGrams.ngram_model(4)
+
+{beginning, _} = Enum.random(ngram_model)
+
+Enum.reverse(beginning)
+|> NGrams.generate(ngram_model, 100)
+```
